@@ -1,7 +1,3 @@
-# Node (removed once the Go port reaches parity — see ../TODO-go-rewrite.md / plan)
-dist/
-node_modules/
-
 # Go build artifacts
 /bootstrap
 *.zip
