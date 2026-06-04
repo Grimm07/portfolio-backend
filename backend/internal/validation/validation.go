@@ -3,6 +3,7 @@ package validation
 
 import (
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -15,6 +16,8 @@ const (
 )
 
 // emailRe mirrors the TypeScript EMAIL_RE: /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+// Note: Go RE2 \s is ASCII-only; JS \s includes Unicode whitespace. Non-ASCII-whitespace
+// edge cases differ negligibly — SES rejects malformed addresses regardless.
 var emailRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
 // controlRe matches all C0 control characters (0x00–0x1f) and DEL (0x7f).
@@ -25,15 +28,7 @@ var controlRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 // non-whitespace content, indicating a bot submission.
 // Mirrors TS: !!website && website.trim().length > 0
 func IsHoneypotTripped(website string) bool {
-	for _, r := range website {
-		switch r {
-		case ' ', '\t', '\n', '\r', '\f', '\v':
-			// whitespace — keep scanning
-		default:
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(website) != ""
 }
 
 // IsTooFast returns true when the elapsed time since the form was rendered

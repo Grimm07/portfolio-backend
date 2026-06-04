@@ -114,11 +114,3 @@ func TestSanitizeName(t *testing.T) {
 		}
 	})
 }
-
-// min is a local helper for older Go toolchains (pre-1.21 builtin).
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
