@@ -16,8 +16,7 @@ payload format 2.0), fronted by CloudFront which injects an `x-origin-verify` se
 - `backend/internal/email` — sends one Amazon SES email per submission (`Reply-To` = submitter).
 - `backend/internal/ip` — extracts client IP for the email body.
 - `backend/internal/secrets` — reads the recipient address from Secrets Manager (never hardcoded).
-- `backend/internal/validation`, `backend/internal/contact` — shared validation + the
-  `ContactSubmission` shape.
+- `backend/internal/validation` — shared field validation (honeypot, time-trap, email/name/message).
 
 **CAPTCHA + rate-limiting are enforced by AWS WAF at the edge**, before the request reaches the
 Lambda — there is no token check or per-IP counter in the handler.
