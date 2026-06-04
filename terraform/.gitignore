@@ -1,0 +1,7 @@
+.terraform/
+.build/
+*.tfstate
+*.tfstate.*
+*.tfvars
+# .terraform.lock.hcl is intentionally COMMITTED (pins provider versions/hashes for
+# reproducible `tofu init`, per HashiCorp guidance). Only the .terraform/ cache is ignored.

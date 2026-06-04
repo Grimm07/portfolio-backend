@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+
+# OpenTofu / Terraform
+.terraform/
+.build/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+
+# Go (for the planned Node->Go rewrite; see TODO-go-rewrite.md)
+bootstrap
+*.test
+/vendor/
+
+# Editor / OS
+.DS_Store
+*.log

@@ -1,0 +1,132 @@
+name: Deploy
+
+# Builds the contact-ingest Lambda bundle and applies the backend Terraform to the
+# shadowspire AWS landing zone (us-east-1), via GitHub OIDC (no long-lived AWS keys).
+#
+#   PR / feature branch  -> DEV  (GitHub Environment "dev",        account 176355979099)
+#   push to main         -> PROD (GitHub Environment "production", account 681053994223)
+#
+# ┌─────────────────────────────────────────────────────────────────────────────────────┐
+# │ OIDC PREREQUISITE (cross-repo): the `portfolio-deploy` role in each account must      │
+# │ trust this repo's OIDC subject. When the backend lived in Grimm07/portfolio the trust │
+# │ policy allowed `repo:Grimm07/portfolio:environment:*`. The infra repo (shadowspire    │
+# │ landing zone) must widen it to also allow                                             │
+# │   repo:Grimm07/portfolio-backend:environment:dev                                      │
+# │   repo:Grimm07/portfolio-backend:environment:production                               │
+# │ Until that lands, the `Configure AWS credentials` step fails with a sts:AssumeRole    │
+# │ "Not authorized to perform sts:AssumeRoleWithWebIdentity" error.                      │
+# └─────────────────────────────────────────────────────────────────────────────────────┘
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # DEV — feature-branch PRs. OIDC sub = repo:Grimm07/portfolio-backend:environment:dev
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy DEV
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      AWS_ACCOUNT: "176355979099"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Configure AWS credentials (OIDC, dev account)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::176355979099:role/portfolio-deploy
+          aws-region: us-east-1
+
+      - name: Build contact Lambda bundle
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
+        with:
+          tofu_version: "1.12.1"
+
+      - name: Apply backend Terraform (dev)
+        working-directory: terraform
+        env:
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          tofu init -reconfigure -backend-config=backend-dev.hcl
+          tofu apply -auto-approve \
+            -var "environment=dev" \
+            -var "contact_email=${CONTACT_EMAIL}" \
+            -var "cloudflare_api_token=${CLOUDFLARE_API_TOKEN}" \
+            -var "cloudflare_zone_id=${CLOUDFLARE_ZONE_ID}"
+
+  # ---------------------------------------------------------------------------
+  # PROD — pushes to main. OIDC sub = repo:Grimm07/portfolio-backend:environment:production
+  # The "production" environment must require reviewers + restrict to the main branch.
+  # ---------------------------------------------------------------------------
+  deploy-prod:
+    name: Deploy PROD
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_ACCOUNT: "681053994223"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Configure AWS credentials (OIDC, prod account)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::681053994223:role/portfolio-deploy
+          aws-region: us-east-1
+
+      - name: Build contact Lambda bundle
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
+        with:
+          tofu_version: "1.12.1"
+
+      - name: Apply backend Terraform (prod)
+        working-directory: terraform
+        env:
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          tofu init -reconfigure -backend-config=backend-prod.hcl
+          tofu apply -auto-approve \
+            -var "environment=prod" \
+            -var "contact_email=${CONTACT_EMAIL}" \
+            -var "cloudflare_api_token=${CLOUDFLARE_API_TOKEN}" \
+            -var "cloudflare_zone_id=${CLOUDFLARE_ZONE_ID}"

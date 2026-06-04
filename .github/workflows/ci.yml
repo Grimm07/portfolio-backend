@@ -1,0 +1,89 @@
+name: CI
+
+# Validation for the contact backend: Lambda unit tests + typecheck, and OpenTofu
+# fmt/validate/lint. No AWS credentials are used here (terraform runs with -backend=false).
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # =============================================================================
+  # BACKEND TESTS - the AWS Lambda code (Node + Vitest, aws-sdk-client-mock).
+  # =============================================================================
+  test-backend:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Backend type check
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Run backend tests
+        working-directory: backend
+        run: npm test
+
+      - name: Audit backend
+        working-directory: backend
+        run: npm audit --audit-level=high || true
+
+  # =============================================================================
+  # TERRAFORM VALIDATION - validates the AWS config without a backend.
+  # =============================================================================
+  terraform:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: "1.12.1"
+
+      - name: OpenTofu Format Check
+        working-directory: terraform
+        run: tofu fmt -check -recursive -diff
+
+      - name: OpenTofu Init (no backend)
+        working-directory: terraform
+        run: tofu init -backend=false
+
+      - name: OpenTofu Validate
+        working-directory: terraform
+        run: tofu validate
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: latest
+
+      - name: Init TFLint
+        working-directory: terraform
+        run: tflint --init
+
+      - name: Run TFLint
+        working-directory: terraform
+        run: tflint --format compact
