@@ -129,7 +129,9 @@ aws lambda invoke --profile shadowspire-dev --region us-east-1 \
 - The recipient address lives in **AWS Secrets Manager** (read at runtime via
   `CONTACT_EMAIL_SECRET_ARN`) — never in code, env, or git. Set it via the `contact_email` tfvar.
 - The recipient **identity must be verified** in SES (one-time), and the domain **DKIM CNAMEs**
-  must resolve. The DKIM CNAMEs are managed in the Cloudflare DNS zone (`ses.tf`).
+  must resolve. The DKIM CNAMEs are managed in the **Route 53 hosted zone** for the domain
+  (`ses.tf`, via `data.aws_route53_zone` + `aws_route53_record`). The apply's AWS role must be able
+  to read+write that zone (see the cross-account note in `ses.tf`).
 - The account may be in the **SES sandbox** — that only allows sending to verified identities.
   Request SES production access **only** if you ever need to email recipients beyond the verified
   inbox.
@@ -153,10 +155,13 @@ aws lambda invoke --profile shadowspire-dev --region us-east-1 \
       both accounts; request SES production access only if recipients beyond the verified inbox are needed.
 - [ ] **GitHub Environments:** `dev` and `production` exist with names matching the OIDC subjects;
       `production` requires reviewers.
-- [ ] **GitHub secrets** (per environment): `CONTACT_EMAIL`, `CLOUDFLARE_API_TOKEN`,
-      `CLOUDFLARE_ZONE_ID` (the last two only for the SES DKIM CNAMEs). Without `CONTACT_EMAIL`, a CI
-      `tofu apply` would revert the recipient.
-- [ ] **Cloudflare Pages git integration:** disconnect it in the Cloudflare dashboard so it stops
-      auto-building on pushes (the site is served from CloudFront now).
-- [ ] **Old secrets:** delete unused Turnstile / MailChannels / CF-Pages secrets; keep
-      `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID` (still needed for SES DKIM).
+- [ ] **GitHub secrets** (per environment): `CONTACT_EMAIL`. Without it, a CI `tofu apply` would
+      revert the recipient. (DNS is on Route 53, so no Cloudflare token is needed — the DKIM CNAMEs
+      are written via the OIDC-authed AWS provider.)
+- [ ] **Route 53 access:** the `portfolio-deploy` OIDC role in each account must be able to
+      read+write the `trystan-tbm.dev` hosted zone (`route53:ListHostedZonesByName`/`GetHostedZone`
+      + `ChangeResourceRecordSets`). If the zone lives in only one account, grant the other env a
+      cross-account/delegated path.
+- [ ] **Cloudflare teardown:** once DKIM resolves from Route 53, remove the old DKIM CNAMEs from the
+      Cloudflare zone and retire the `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ZONE_ID` secrets.
+- [ ] **Old secrets:** delete unused Turnstile / MailChannels / CF-Pages secrets.

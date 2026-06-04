@@ -71,15 +71,11 @@ jobs:
         working-directory: terraform
         env:
           CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
         run: |
           tofu init -reconfigure -backend-config=backend-dev.hcl
           tofu apply -auto-approve \
             -var "environment=dev" \
-            -var "contact_email=${CONTACT_EMAIL}" \
-            -var "cloudflare_api_token=${CLOUDFLARE_API_TOKEN}" \
-            -var "cloudflare_zone_id=${CLOUDFLARE_ZONE_ID}"
+            -var "contact_email=${CONTACT_EMAIL}"
 
   # ---------------------------------------------------------------------------
   # PROD — pushes to main. OIDC sub = repo:Grimm07/portfolio-backend:environment:production
@@ -121,12 +117,8 @@ jobs:
         working-directory: terraform
         env:
           CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
         run: |
           tofu init -reconfigure -backend-config=backend-prod.hcl
           tofu apply -auto-approve \
             -var "environment=prod" \
-            -var "contact_email=${CONTACT_EMAIL}" \
-            -var "cloudflare_api_token=${CLOUDFLARE_API_TOKEN}" \
-            -var "cloudflare_zone_id=${CLOUDFLARE_ZONE_ID}"
+            -var "contact_email=${CONTACT_EMAIL}"

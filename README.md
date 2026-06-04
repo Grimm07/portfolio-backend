@@ -77,8 +77,10 @@ backend-config) via GitHub OIDC. PRs deploy **dev**; pushes to `main` deploy **p
 > (it previously only allowed `repo:Grimm07/portfolio:environment:*`). Until that change lands in
 > the infra repo, the deploy's `Configure AWS credentials` step fails to assume the role.
 
-Required GitHub **secrets** (per environment): `CONTACT_EMAIL`, `CLOUDFLARE_API_TOKEN`,
-`CLOUDFLARE_ZONE_ID`. The `production` environment should require reviewers and restrict to `main`.
+Required GitHub **secrets** (per environment): `CONTACT_EMAIL`. DNS is on Amazon Route 53, so the
+SES DKIM records are written via the AWS provider (no Cloudflare token) — the deploy's OIDC role must
+be able to read+write the `trystan-tbm.dev` hosted zone (see the cross-account note in
+`terraform/ses.tf`). The `production` environment should require reviewers and restrict to `main`.
 
 ## Operations
 

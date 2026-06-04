@@ -30,7 +30,7 @@ recipient secret, and the SSM handshake that wires the function into the edge.
 |----------|------|-------|
 | Ingest Lambda `portfolio-contact-ingest` + `AWS_IAM` Function URL | `lambda.tf` | Bundle is `backend/dist/ingest/index.mjs`, zipped via `archive_file` |
 | Lambda IAM role + least-privilege policy | `iam.tf` | `ses:SendEmail`/`ses:SendRawEmail` (scoped by a `ses:FromAddress` condition), `secretsmanager:GetSecretValue`, plus basic Lambda logging |
-| SES domain identity + DKIM | `ses.tf` | DKIM CNAMEs are created in the **Cloudflare DNS zone** — the only remaining Cloudflare use |
+| SES domain identity + DKIM | `ses.tf` | DKIM CNAMEs are created in the **Route 53 hosted zone** (`data.aws_route53_zone` + `aws_route53_record`) |
 | SES recipient email identity | `ses.tf` | Triggers a one-time verification email to `contact_email` (manual click) |
 | Contact-email secret `portfolio-contact-contact-email` | `secrets.tf` | Holds the recipient address; read by the Lambda at runtime |
 | SSM publish: function URL + ARN | `ssm.tf` | `/portfolio/<env>/ingest-function-url`, `/portfolio/<env>/ingest-function-arn` |
@@ -148,7 +148,7 @@ tofu init -reconfigure -backend-config=backend-dev.hcl    # or backend-prod.hcl
 ## Setup
 
 Create `terraform.tfvars` from the example (it is **gitignored** — it contains the recipient
-address and the Cloudflare token):
+address):
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -164,10 +164,6 @@ environment = "dev"
 # Recipient address for contact emails (stored in Secrets Manager, never in plaintext code).
 contact_email = "your-email@example.com"
 
-# Cloudflare — required ONLY for the SES DKIM CNAMEs (DNS still lives in the Cloudflare zone).
-cloudflare_api_token = "..."
-cloudflare_zone_id   = "..."
-
 # domain_name defaults to trystan-tbm.dev; override only if needed.
 # domain_name = "trystan-tbm.dev"
 ```
@@ -176,13 +172,14 @@ cloudflare_zone_id   = "..."
 |----------|----------|---------|
 | `environment` | yes | `"dev"` or `"prod"` (validated); drives SSM paths and resource selection |
 | `contact_email` | yes | Recipient address, stored in Secrets Manager |
-| `cloudflare_api_token` | yes | DNS edit token for the SES DKIM CNAMEs only |
-| `cloudflare_zone_id` | yes | Zone for the DKIM CNAMEs |
-| `domain_name` | no | Defaults to `trystan-tbm.dev` |
+| `domain_name` | no | Defaults to `trystan-tbm.dev`; also the Route 53 hosted-zone name for DKIM |
 | `aws_region` | no | Defaults to `us-east-1` |
 
-> The Cloudflare token needs only **Zone → DNS → Edit** on the `trystan-tbm.dev` zone — nothing
-> more. It exists solely to publish the three SES DKIM CNAME records.
+> **DNS is on Amazon Route 53** (migrated off Cloudflare). The SES DKIM CNAMEs are written to the
+> `trystan-tbm.dev` hosted zone via the AWS provider (`data.aws_route53_zone` +
+> `aws_route53_record` in `ses.tf`) — no Cloudflare token. The apply's AWS principal must have
+> `route53:ListHostedZonesByName`/`GetHostedZone` + `ChangeResourceRecordSets` on that zone, and
+> (since dev and prod are separate accounts) the zone must be reachable from the env being applied.
 
 ---
 
@@ -319,7 +316,7 @@ The `environment` variable is validated. Set it in `terraform.tfvars` or pass
 
 - The recipient identity (`aws_ses_email_identity.recipient`) sends a one-time confirmation email to
   `contact_email`. Click the link in that email or SES will refuse to send to it.
-- DKIM CNAMEs are created in the Cloudflare zone; propagation can take a few minutes. Check status:
+- DKIM CNAMEs are created in the Route 53 hosted zone; propagation can take a few minutes. Check status:
   ```bash
   aws ses get-identity-dkim-attributes --identities trystan-tbm.dev --region us-east-1
   ```
@@ -339,8 +336,8 @@ tofu state show aws_lambda_function.ingest
   configuration. The recipient address lives in **AWS Secrets Manager**
   (`portfolio-contact-contact-email`) and is read by the Lambda at runtime; the sender is derived as
   `noreply@<domain_name>`.
-- **`terraform.tfvars` is gitignored.** It contains `contact_email` and the Cloudflare token — never
-  commit it. Verify with `git status` before committing.
+- **`terraform.tfvars` is gitignored.** It contains `contact_email` — never commit it. Verify with
+  `git status` before committing.
 - **State may contain sensitive values.** It lives encrypted in the per-env S3 backend, scoped to
   each account. Don't copy `*.tfstate` locally or into git.
 - **Least-privilege IAM.** The Lambda role can only send SES email from the verified `from_email`
@@ -382,16 +379,16 @@ tofu state list
 
 ```
 terraform/
-├── main.tf                   # required_providers (cloudflare/aws/archive) + cloudflare provider
+├── main.tf                   # required_providers (aws/archive)
 ├── providers_aws.tf          # aws provider, default tags, locals (name_prefix, from_email)
-├── variables.tf              # environment, contact_email, cloudflare_*, domain_name, aws_region
+├── variables.tf              # environment, contact_email, domain_name, aws_region
 ├── outputs.tf                # ingest function url/name + SSM param names
 ├── backend.tf                # partial S3 backend (bucket/lock supplied per-env at init)
 ├── backend-dev.hcl           # dev account backend config
 ├── backend-prod.hcl          # prod account backend config
 ├── lambda.tf                 # ingest Lambda + AWS_IAM Function URL (archive from backend/dist)
 ├── iam.tf                    # ingest role + least-privilege policy
-├── ses.tf                    # SES domain identity + DKIM (CNAMEs in Cloudflare zone) + recipient
+├── ses.tf                    # SES domain identity + DKIM (CNAMEs in Route 53 zone) + recipient
 ├── secrets.tf                # contact-email secret (recipient address)
 ├── ssm.tf                    # publishes ingest-function-url / ingest-function-arn
 ├── permissions.tf            # CloudFront OAC invoke grant (reads cloudfront-distribution-arn)

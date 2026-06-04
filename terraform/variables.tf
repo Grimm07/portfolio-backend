@@ -1,14 +1,3 @@
-variable "cloudflare_api_token" {
-  description = "Cloudflare API token with appropriate permissions"
-  type        = string
-  sensitive   = true
-}
-
-variable "cloudflare_zone_id" {
-  description = "Cloudflare zone ID for the domain (trystan-tbm.dev)"
-  type        = string
-}
-
 variable "contact_email" {
   description = "Email address to receive contact form submissions"
   type        = string

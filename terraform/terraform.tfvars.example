@@ -6,9 +6,9 @@ environment = "dev"
 # Recipient address for contact emails (stored in Secrets Manager, never in plaintext code).
 contact_email = "your-email@example.com"
 
-# Cloudflare — required ONLY for the SES DKIM CNAMEs (DNS still lives in the Cloudflare zone).
-cloudflare_api_token = "..."
-cloudflare_zone_id   = "..."
+# DNS is on Amazon Route 53. The SES DKIM CNAMEs are written to the hosted zone for `domain_name`
+# via the AWS provider (looked up with data.aws_route53_zone) — no Cloudflare token is needed.
+# The apply's AWS role must be able to read+write that zone (see the cross-account note in ses.tf).
 
 # domain_name defaults to trystan-tbm.dev; override only if needed.
 # domain_name = "trystan-tbm.dev"
