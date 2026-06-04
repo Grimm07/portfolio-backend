@@ -28,7 +28,7 @@ recipient secret, and the SSM handshake that wires the function into the edge.
 
 | Resource | File | Notes |
 |----------|------|-------|
-| Ingest Lambda `portfolio-contact-ingest` + `AWS_IAM` Function URL | `lambda.tf` | Bundle is `backend/dist/ingest/index.mjs`, zipped via `archive_file` |
+| Ingest Lambda `portfolio-contact-ingest` + `AWS_IAM` Function URL | `lambda.tf` | Binary is `backend/bootstrap` (static arm64), zipped via `archive_file`; runtime `provided.al2023` |
 | Lambda IAM role + least-privilege policy | `iam.tf` | `ses:SendEmail`/`ses:SendRawEmail` (scoped by a `ses:FromAddress` condition), `secretsmanager:GetSecretValue`, plus basic Lambda logging |
 | SES domain identity + DKIM | `ses.tf` | DKIM CNAMEs are created in the **Route 53 hosted zone** (`data.aws_route53_zone` + `aws_route53_record`) |
 | SES recipient email identity | `ses.tf` | Triggers a one-time verification email to `contact_email` (manual click) |
@@ -85,10 +85,10 @@ aws sts get-caller-identity                 # confirm the account matches the en
 
 All resources are created in `us-east-1`.
 
-### Node.js (for the Lambda build)
+### Go (for the Lambda build)
 
-The Lambda bundle is produced by the `backend/` build before each apply. Node 18+ or 20+ is required
-(the Lambda runtime is `nodejs20.x`). See [Build + Apply Workflow](#build--apply-workflow).
+The Lambda binary is produced by the `backend/` build before each apply. Go 1.22 is required
+(the Lambda runtime is `provided.al2023`, arm64 custom runtime). See [Build + Apply Workflow](#build--apply-workflow).
 
 ---
 
@@ -185,14 +185,14 @@ contact_email = "your-email@example.com"
 
 ## Build + Apply Workflow
 
-### Critical: build the Lambda bundle first
+### Critical: build the Lambda binary first
 
-The `archive_file` data source in `lambda.tf` reads `backend/dist/ingest/index.mjs`. If that file
-does not exist, the apply fails. **Always build the bundle before `tofu apply`:**
+The `archive_file` data source in `lambda.tf` reads `backend/bootstrap`. If that file does not
+exist, the apply fails. **Always build the binary before `tofu apply`:**
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-cd backend && npm run build      # produces backend/dist/ingest/index.mjs
+cd backend && make build      # produces backend/bootstrap (static arm64 binary)
 cd ../terraform
 ```
 
@@ -201,8 +201,8 @@ cd ../terraform
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 
-# 1. Build the Lambda bundle
-cd backend && npm run build && cd ../terraform
+# 1. Build the Lambda binary
+cd backend && make build && cd ../terraform
 
 # 2. Init the dev backend
 tofu init -reconfigure -backend-config=backend-dev.hcl
@@ -224,7 +224,7 @@ point at the **prod account** (`681053994223`):
 export AWS_PROFILE=portfolio-prod
 aws sts get-caller-identity                          # confirm 681053994223
 
-cd backend && npm run build && cd ../terraform
+cd backend && make build && cd ../terraform
 tofu init -reconfigure -backend-config=backend-prod.hcl
 tofu validate
 tofu apply -var environment=prod
@@ -269,12 +269,12 @@ After a successful apply (`tofu output`):
 
 ## Troubleshooting
 
-### `archive_file` can't find `backend/dist/ingest/index.mjs`
+### `archive_file` can't find `backend/bootstrap`
 
-The Lambda bundle hasn't been built. Run the build, then apply:
+The Lambda binary hasn't been built. Run the build, then apply:
 
 ```bash
-cd backend && npm run build
+cd backend && make build
 cd ../terraform && tofu apply -var environment=dev
 ```
 
@@ -354,8 +354,8 @@ tofu state show aws_lambda_function.ingest
 # Always first: put tofu on PATH (user-local install)
 export PATH="$HOME/.local/bin:$PATH"
 
-# Build the Lambda bundle (REQUIRED before apply)
-cd backend && npm run build && cd ../terraform
+# Build the Lambda binary (REQUIRED before apply)
+cd backend && make build && cd ../terraform
 
 # Init the per-env backend (dev shown; use backend-prod.hcl for prod)
 tofu init -reconfigure -backend-config=backend-dev.hcl
@@ -386,7 +386,7 @@ terraform/
 ├── backend.tf                # partial S3 backend (bucket/lock supplied per-env at init)
 ├── backend-dev.hcl           # dev account backend config
 ├── backend-prod.hcl          # prod account backend config
-├── lambda.tf                 # ingest Lambda + AWS_IAM Function URL (archive from backend/dist)
+├── lambda.tf                 # ingest Lambda + AWS_IAM Function URL (archive from backend/bootstrap)
 ├── iam.tf                    # ingest role + least-privilege policy
 ├── ses.tf                    # SES domain identity + DKIM (CNAMEs in Route 53 zone) + recipient
 ├── secrets.tf                # contact-email secret (recipient address)
