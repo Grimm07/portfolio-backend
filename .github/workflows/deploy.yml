@@ -44,11 +44,10 @@ jobs:
       AWS_ACCOUNT: "176355979099"
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
+          go-version: '1.22'
+          cache-dependency-path: backend/go.sum
 
       - name: Configure AWS credentials (OIDC, dev account)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -56,11 +55,9 @@ jobs:
           role-to-assume: arn:aws:iam::176355979099:role/portfolio-deploy
           aws-region: us-east-1
 
-      - name: Build contact Lambda bundle
+      - name: Build contact Lambda bundle (Go arm64 bootstrap)
         working-directory: backend
-        run: |
-          npm ci
-          npm run build
+        run: make build
 
       - name: Setup OpenTofu
         uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
@@ -90,11 +87,10 @@ jobs:
       AWS_ACCOUNT: "681053994223"
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
+          go-version: '1.22'
+          cache-dependency-path: backend/go.sum
 
       - name: Configure AWS credentials (OIDC, prod account)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -102,11 +98,9 @@ jobs:
           role-to-assume: arn:aws:iam::681053994223:role/portfolio-deploy
           aws-region: us-east-1
 
-      - name: Build contact Lambda bundle
+      - name: Build contact Lambda bundle (Go arm64 bootstrap)
         working-directory: backend
-        run: |
-          npm ci
-          npm run build
+        run: make build
 
       - name: Setup OpenTofu
         uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8

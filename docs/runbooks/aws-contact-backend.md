@@ -62,7 +62,7 @@ aws ssm get-parameter --profile shadowspire-dev --region us-east-1 \
 
 `.github/workflows/deploy.yml` authenticates to AWS via OIDC (no long-lived keys), then per env:
 
-1. Builds the Lambda bundle (`cd backend && npm run build`).
+1. Builds the Lambda binary (`cd backend && make build`).
 2. `tofu init -reconfigure -backend-config=backend-<env>.hcl` then
    `tofu apply -auto-approve -var environment=<env> ...`.
 3. Builds the frontend and `aws s3 sync`s it to the env's site bucket.
@@ -73,11 +73,11 @@ The `production` GitHub Environment should require reviewers; the prod job pause
 ### Break-glass / first-time — local apply
 
 > `tofu` is a user-local install. Run `export PATH="$HOME/.local/bin:$PATH"` first.
-> **Always build the Lambda bundle before applying** — the archive references `backend/dist`.
+> **Always build the Lambda binary before applying** — the archive references `backend/bootstrap`.
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-cd backend && npm run build && cd ../terraform
+cd backend && make build && cd ../terraform
 
 # dev
 tofu init -reconfigure -backend-config=backend-dev.hcl

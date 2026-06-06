@@ -1,7 +1,8 @@
-# Zip the ingest bundle. The bundle file is index.mjs at the zip root; ESM handler = "index.handler".
+# Zip the ingest binary. For the provided.al2023 custom runtime the executable must be named
+# `bootstrap` at the zip root. Built by `make -C ../backend build` (GOOS=linux GOARCH=arm64).
 data "archive_file" "ingest" {
   type        = "zip"
-  source_file = "${path.module}/../backend/dist/ingest/index.mjs"
+  source_file = "${path.module}/../backend/bootstrap"
   output_path = "${path.module}/.build/ingest.zip"
 }
 
@@ -13,10 +14,12 @@ data "aws_ssm_parameter" "origin_verify" {
 }
 
 resource "aws_lambda_function" "ingest" {
-  function_name    = "${local.name_prefix}-ingest"
-  role             = aws_iam_role.ingest.arn
-  runtime          = "nodejs20.x"
-  handler          = "index.handler"
+  function_name = "${local.name_prefix}-ingest"
+  role          = aws_iam_role.ingest.arn
+  # Go on the custom runtime: the `bootstrap` binary is the entrypoint. Built for arm64/Graviton.
+  runtime          = "provided.al2023"
+  handler          = "bootstrap"
+  architectures    = ["arm64"]
   filename         = data.archive_file.ingest.output_path
   source_code_hash = data.archive_file.ingest.output_base64sha256
   timeout          = 10
