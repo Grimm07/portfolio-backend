@@ -1,9 +1,8 @@
-# Zip the ingest binary. For the provided.al2023 custom runtime the executable must be named
-# `bootstrap` at the zip root. Built by `make -C ../backend build` (GOOS=linux GOARCH=arm64).
-data "archive_file" "ingest" {
-  type        = "zip"
-  source_file = "${path.module}/../backend/bootstrap"
-  output_path = "${path.module}/.build/ingest.zip"
+# Infra publishes the per-account Lambda artifact bucket name here (shadowspire-<env>-lambda-artifacts-<acct>).
+# The ingest zip is built + uploaded by GitHub Actions (.github/workflows/deploy.yml), keyed by commit SHA;
+# this stack only references the already-uploaded object — it no longer builds the zip in-band.
+data "aws_ssm_parameter" "artifact_bucket" {
+  name = "/shadowspire/${var.environment}/lambda-artifacts-bucket"
 }
 
 # Origin-verify shared secret, published by the infra repo in phase 2 (SecureString).
@@ -17,13 +16,17 @@ resource "aws_lambda_function" "ingest" {
   function_name = "${local.name_prefix}-ingest"
   role          = aws_iam_role.ingest.arn
   # Go on the custom runtime: the `bootstrap` binary is the entrypoint. Built for arm64/Graviton.
-  runtime          = "provided.al2023"
-  handler          = "bootstrap"
-  architectures    = ["arm64"]
-  filename         = data.archive_file.ingest.output_path
-  source_code_hash = data.archive_file.ingest.output_base64sha256
-  timeout          = 10
-  memory_size      = 256
+  runtime       = "provided.al2023"
+  handler       = "bootstrap"
+  architectures = ["arm64"]
+  # Artifact comes from S3, not an in-band archive_file. The key is the deploying commit's SHA
+  # (TF_VAR_artifact_key, set per-deploy by GitHub Actions before triggering the Spacelift run),
+  # so a new deploy = new key = the function code updates. No source_code_hash needed: the changed
+  # s3_key is itself the change signal.
+  s3_bucket   = data.aws_ssm_parameter.artifact_bucket.value
+  s3_key      = var.artifact_key
+  timeout     = 10
+  memory_size = 256
 
   environment {
     variables = {

@@ -25,3 +25,8 @@ variable "environment" {
     error_message = "environment must be \"dev\" or \"prod\"."
   }
 }
+
+variable "artifact_key" {
+  description = "S3 key of the ingest Lambda zip in the artifact bucket, keyed by commit SHA (e.g. <sha>.zip). Supplied per-deploy by GitHub Actions as TF_VAR_artifact_key before triggering the Spacelift run; no default so a stray apply fails loudly."
+  type        = string
+}
