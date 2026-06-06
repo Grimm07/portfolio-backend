@@ -1,7 +1,7 @@
 # AWS provider + supporting providers for the contact backend (Plan 2a).
 # ACM/CloudFront/WAF in Plan 2b also require us-east-1, so a single region keeps things simple.
 #
-# NOTE: provider version pins for aws/archive live in main.tf's single `required_providers`
+# NOTE: the provider version pin for aws lives in main.tf's single `required_providers`
 # block. OpenTofu permits only ONE required_providers per module (the plan's original note
 # that they merge across files was incorrect), so they are consolidated there.
 

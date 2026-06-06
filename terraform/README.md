@@ -28,7 +28,7 @@ recipient secret, and the SSM handshake that wires the function into the edge.
 
 | Resource | File | Notes |
 |----------|------|-------|
-| Ingest Lambda `portfolio-contact-ingest` + `AWS_IAM` Function URL | `lambda.tf` | Binary is `backend/bootstrap` (static arm64), zipped via `archive_file`; runtime `provided.al2023` |
+| Ingest Lambda `portfolio-contact-ingest` + `AWS_IAM` Function URL | `lambda.tf` | Binary is `backend/bootstrap` (static arm64), built + uploaded to the artifact bucket by CI (S3 source: `s3_bucket` from SSM, `s3_key` by commit SHA); runtime `provided.al2023` |
 | Lambda IAM role + least-privilege policy | `iam.tf` | `ses:SendEmail`/`ses:SendRawEmail` (scoped by a `ses:FromAddress` condition), `secretsmanager:GetSecretValue`, plus basic Lambda logging |
 | SES domain identity + DKIM | `ses.tf` | DKIM CNAMEs are created in the **Route 53 hosted zone** (`data.aws_route53_zone` + `aws_route53_record`) |
 | SES recipient email identity | `ses.tf` | Triggers a one-time verification email to `contact_email` (manual click) |
@@ -185,69 +185,48 @@ contact_email = "your-email@example.com"
 
 ## Build + Apply Workflow
 
-### Critical: build the Lambda binary first
+### Deploy model: CI builds the artifact, Spacelift applies
 
-The `archive_file` data source in `lambda.tf` reads `backend/bootstrap`. If that file does not
-exist, the apply fails. **Always build the binary before `tofu apply`:**
+Deploys run through **GitHub Actions + Spacelift** (`.github/workflows/deploy.yml`). CI never runs
+`tofu apply`:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-cd backend && make build      # produces backend/bootstrap (static arm64 binary)
-cd ../terraform
-```
+1. **Build** the Go binary: `make -C backend build` → `backend/bootstrap` (static arm64).
+2. **Package + upload**: CI zips `bootstrap` at the archive root and uploads it to the infra-owned
+   artifact bucket, keyed by commit SHA — `s3://shadowspire-<env>-lambda-artifacts-<acct>/<sha>.zip`
+   (the bucket name is read from SSM `/shadowspire/<env>/lambda-artifacts-bucket`).
+3. **Trigger**: CI sets `TF_VAR_artifact_key=<sha>.zip` on the matching Spacelift stack
+   (`portfolio-backend-<env>`) and runs `spacectl stack deploy --auto-confirm`. Spacelift applies the
+   Terraform against this repo's own S3 state, pointing `aws_lambda_function.ingest` at that S3
+   object (`s3_bucket` from SSM, `s3_key = var.artifact_key`).
 
-### Canonical workflow (dev)
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-
-# 1. Build the Lambda binary
-cd backend && make build && cd ../terraform
-
-# 2. Init the dev backend
-tofu init -reconfigure -backend-config=backend-dev.hcl
-
-# 3. Validate config
-tofu validate
-
-# 4. Plan / apply against dev (must match the backend you init'd)
-tofu plan  -var environment=dev
-tofu apply -var environment=dev
-```
-
-### Promoting to prod
-
-Re-init against the prod backend and apply with `environment=prod`. Make sure your AWS credentials
-point at the **prod account** (`681053994223`):
-
-```bash
-export AWS_PROFILE=portfolio-prod
-aws sts get-caller-identity                          # confirm 681053994223
-
-cd backend && make build && cd ../terraform
-tofu init -reconfigure -backend-config=backend-prod.hcl
-tofu validate
-tofu apply -var environment=prod
-```
+`environment` and `contact_email` come from the Spacelift stack (`TF_VAR_environment` is set by
+`spacelift-admin`; `TF_VAR_contact_email` is an operator-set stack secret), not from CI. There are no
+long-lived AWS keys — CI auths via OIDC for the SSM read + S3 upload only.
 
 ### Validate-only (no AWS credentials)
-
-To syntax/type-check the configuration without touching a backend or AWS:
 
 ```bash
 tofu init -backend=false
 tofu validate
 ```
 
-### CI vs. local applies
+### Break-glass local apply
 
-In normal operation, deploys run through **GitHub Actions with OIDC**
-(`.github/workflows/deploy.yml`): the workflow builds the Lambda bundle and runs `tofu apply` for the
-target env (using the matching per-env backend config) before syncing the site. There are no
-long-lived AWS keys.
+Local applies are reserved for break-glass / first-time setup. Because the Lambda is now sourced from
+S3, a local apply must point at an artifact that already exists in the bucket:
 
-Local applies are reserved for **break-glass / first-time setup** — e.g. bootstrapping a new env, or
-the initial two-phase handshake with the infra repo.
+```bash
+export AWS_PROFILE=portfolio-<env>          # confirm with: aws sts get-caller-identity
+cd backend && make build && cd ../terraform
+
+BUCKET=$(aws ssm get-parameter --name /shadowspire/<env>/lambda-artifacts-bucket \
+          --query Parameter.Value --output text)
+KEY="local-$(git rev-parse --short HEAD).zip"
+( cd ../backend && zip -j "/tmp/$KEY" bootstrap ) && aws s3 cp "/tmp/$KEY" "s3://$BUCKET/$KEY"
+
+tofu init -reconfigure -backend-config=backend-<env>.hcl
+tofu apply -var environment=<env> -var artifact_key="$KEY" -var contact_email=<addr>
+```
 
 ---
 
@@ -269,14 +248,12 @@ After a successful apply (`tofu output`):
 
 ## Troubleshooting
 
-### `archive_file` can't find `backend/bootstrap`
+### Lambda apply fails: artifact not found in bucket
 
-The Lambda binary hasn't been built. Run the build, then apply:
-
-```bash
-cd backend && make build
-cd ../terraform && tofu apply -var environment=dev
-```
+`aws_lambda_function.ingest` points at `s3://<artifact-bucket>/<artifact_key>`. The apply fails if no
+object exists at that key. In CI this can't happen (the upload precedes the trigger). For a local
+break-glass apply, build + upload the artifact first and pass a matching `-var artifact_key=...` (see
+**Break-glass local apply** above).
 
 ### `permissions.tf` / data source error: SSM parameter not found
 
@@ -379,14 +356,14 @@ tofu state list
 
 ```
 terraform/
-├── main.tf                   # required_providers (aws/archive)
+├── main.tf                   # required_providers (aws)
 ├── providers_aws.tf          # aws provider, default tags, locals (name_prefix, from_email)
 ├── variables.tf              # environment, contact_email, domain_name, aws_region
 ├── outputs.tf                # ingest function url/name + SSM param names
 ├── backend.tf                # partial S3 backend (bucket/lock supplied per-env at init)
 ├── backend-dev.hcl           # dev account backend config
 ├── backend-prod.hcl          # prod account backend config
-├── lambda.tf                 # ingest Lambda + AWS_IAM Function URL (archive from backend/bootstrap)
+├── lambda.tf                 # ingest Lambda + AWS_IAM Function URL (S3 artifact: bucket from SSM, key by SHA)
 ├── iam.tf                    # ingest role + least-privilege policy
 ├── ses.tf                    # SES domain identity + DKIM (CNAMEs in Route 53 zone) + recipient
 ├── secrets.tf                # contact-email secret (recipient address)
