@@ -65,6 +65,11 @@ jobs:
       ENV: dev
       AWS_ACCOUNT: "176355979099"
       SPACELIFT_STACK: portfolio-backend-dev
+      # On pull_request, $GITHUB_SHA is the synthesized merge ref (refs/pull/N/merge),
+      # which Spacelift's GitHub App cannot resolve as a tracked commit. HEAD_SHA is the
+      # PR branch tip — the commit actions/checkout checks out and we build the artifact
+      # from — and the one we pin the dev stack to below. Use it everywhere in this job.
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v5
@@ -84,14 +89,14 @@ jobs:
 
       - name: Zip bootstrap at zip root, keyed by SHA
         # provided.al2023 requires the executable named `bootstrap` at the ZIP ROOT; -j junks the path.
-        run: ( cd backend && zip -j "../$GITHUB_SHA.zip" bootstrap )
+        run: ( cd backend && zip -j "../$HEAD_SHA.zip" bootstrap )
 
       - name: Upload artifact to per-account bucket
         run: |
           BUCKET=$(aws ssm get-parameter \
             --name "/shadowspire/${ENV}/lambda-artifacts-bucket" \
             --query Parameter.Value --output text)
-          aws s3 cp "$GITHUB_SHA.zip" "s3://$BUCKET/$GITHUB_SHA.zip"
+          aws s3 cp "$HEAD_SHA.zip" "s3://$BUCKET/$HEAD_SHA.zip"
 
       - name: Install spacectl
         uses: spacelift-io/setup-spacectl@e92035013ee29ed401c9d35772b3ab2f4c8d12cd # v2.1.0
@@ -102,17 +107,27 @@ jobs:
           SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
           SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
         run: |
-          # Pin the artifact key on the stack, then trigger a tracked run.
+          # Pin the tracked commit to THIS PR's head SHA first, then the artifact key, then deploy.
           #
-          # Interleave consideration: TF_VAR_artifact_key is mutable stack env, so in theory two
-          # deploys to the SAME stack could race (setvar A, setvar B, deploy A picks up B's key).
-          # This is safe here because: (a) Spacelift SERIALIZES tracked runs per stack — the second
-          # deploy queues behind the first and re-reads stack env at its own plan time; and
-          # (b) GitHub's `concurrency: deploy-${{ github.ref }}` already serializes per ref, and dev
-          # vs prod target DISTINCT stacks. `deploy` has no run-scoped --tf-env-var-override (that's
-          # local-preview only), so setvar + deploy is the supported mechanism for tracked runs.
+          # Why the explicit pin: the app stacks carry a GIT_PUSH `ignore { true }` policy
+          # (infra spacelift-admin/gitops.tf), so Spacelift never advances the tracked commit
+          # from VCS webhooks. Without set-current-commit, `stack deploy` re-runs whatever stale
+          # commit Spacelift last recorded — not this PR's code. spacectl/API calls bypass push
+          # policies, so this set is honored. We pin to HEAD_SHA (the PR branch tip), NOT
+          # $GITHUB_SHA: on pull_request the latter is the refs/pull/N/merge ref, which Spacelift
+          # cannot resolve. HEAD_SHA is also the exact commit we built + uploaded the artifact for.
+          #
+          # Interleave consideration: TF_VAR_artifact_key (and now the tracked commit) is mutable
+          # stack state, so in theory two deploys to the SAME stack could race. This is safe here
+          # because: (a) Spacelift SERIALIZES tracked runs per stack — the second deploy queues
+          # behind the first and re-reads stack state at its own plan time; and (b) GitHub's
+          # `concurrency: deploy-${{ github.ref }}` serializes per ref, and dev vs prod target
+          # DISTINCT stacks. (Concurrent PRs to dev remain a known constraint — one PR open at a
+          # time. See the infra migration runbook.)
+          spacectl stack set-current-commit \
+            --id "$SPACELIFT_STACK" --sha "$HEAD_SHA"
           spacectl stack environment setvar \
-            --id "$SPACELIFT_STACK" TF_VAR_artifact_key "$GITHUB_SHA.zip"
+            --id "$SPACELIFT_STACK" TF_VAR_artifact_key "$HEAD_SHA.zip"
           # --auto-confirm CONFIRMS the tracked run (so it proceeds past the unconfirmed
           # state) but does NOT, by itself, guarantee this job blocks on the outcome. --tail
           # is what makes spacectl stream the run log and BLOCK until the run finishes, exiting
@@ -156,17 +171,19 @@ jobs:
           SPACELIFT_API_KEY_ENDPOINT: ${{ secrets.SPACELIFT_API_KEY_ENDPOINT }}
           SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
           SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
-        working-directory: terraform
         run: |
-          # --no-find-repository-root: package from THIS dir (terraform/) instead of
-          #   walking up to the repo .git root, matching the stack's project_root.
-          # --tf-env-var-override: run-scoped TF_VAR_artifact_key, NOT a stack setvar.
+          # Run from the repo root (NOT terraform/) and let spacectl find the .git root, so the
+          # uploaded package is the whole repo and Spacelift applies the stack's project_root
+          # ("terraform") to descend into it. The earlier `working-directory: terraform` +
+          # --no-find-repository-root packaged terraform/ AS the root, then project_root=terraform
+          # was applied on top -> "project root terraform does not exist". Don't reintroduce either.
+          # --tf-env-var-override: run-scoped TF_VAR_artifact_key, NOT a stack setvar. The artifact
+          # need not exist for a plan; the var only needs to resolve.
           # local-preview tails by default; it exits non-zero on plan failure, making
           # this job the prod-plan check. (No --auto-confirm: previews never apply.)
           spacectl stack local-preview \
             --id "$SPACELIFT_STACK" \
-            --tf-env-var-override "artifact_key=${GITHUB_SHA}.zip" \
-            --no-find-repository-root
+            --tf-env-var-override "artifact_key=${GITHUB_SHA}.zip"
 
   # ---------------------------------------------------------------------------
   # PROD — pushes to main. OIDC sub = repo:Grimm07/portfolio-backend:environment:production
@@ -174,7 +191,15 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-prod:
     name: Deploy PROD
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Staged-apply gate (repo idiom, cf. infra custom_domain_active): prod auto-applies on
+    # merge ONLY when the repo variable PROD_DEPLOY_ENABLED is set to "true". It is UNSET by
+    # default, so merges to main skip the prod apply. This guards the deliberate prod /api
+    # Function-URL -> API-Gateway origin cutover: until that migration is done, a clean prod
+    # apply would DESTROY the live Function URL prod /api still serves through. Flip the repo
+    # variable to "true" only when prod is intentionally ready to converge.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && vars.PROD_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -221,15 +246,22 @@ jobs:
           SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
           SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
         run: |
-          # Pin the artifact key on the stack, then trigger a tracked run.
+          # Pin the tracked commit to the merged main tip first, then the artifact key, then deploy.
           #
-          # Interleave consideration: TF_VAR_artifact_key is mutable stack env, so in theory two
-          # deploys to the SAME stack could race (setvar A, setvar B, deploy A picks up B's key).
-          # This is safe here because: (a) Spacelift SERIALIZES tracked runs per stack — the second
-          # deploy queues behind the first and re-reads stack env at its own plan time; and
-          # (b) GitHub's `concurrency: deploy-${{ github.ref }}` already serializes per ref, and dev
-          # vs prod target DISTINCT stacks. `deploy` has no run-scoped --tf-env-var-override (that's
-          # local-preview only), so setvar + deploy is the supported mechanism for tracked runs.
+          # Why the explicit pin: the app stacks carry a GIT_PUSH `ignore { true }` policy
+          # (infra spacelift-admin/gitops.tf), so Spacelift never advances the tracked commit
+          # from the merge push. Without set-current-commit, `stack deploy` re-runs the stale
+          # frozen commit instead of this merge. On push:main, $GITHUB_SHA IS the real branch
+          # tip (not a refs/pull/N/merge ref), so it resolves and is the commit we built for.
+          #
+          # Interleave consideration: TF_VAR_artifact_key (and the tracked commit) is mutable
+          # stack env, so in theory two deploys to the SAME stack could race. This is safe here
+          # because: (a) Spacelift SERIALIZES tracked runs per stack — the second deploy queues
+          # behind the first and re-reads stack env at its own plan time; and (b) GitHub's
+          # `concurrency: deploy-${{ github.ref }}` already serializes per ref, and dev vs prod
+          # target DISTINCT stacks.
+          spacectl stack set-current-commit \
+            --id "$SPACELIFT_STACK" --sha "$GITHUB_SHA"
           spacectl stack environment setvar \
             --id "$SPACELIFT_STACK" TF_VAR_artifact_key "$GITHUB_SHA.zip"
           # --auto-confirm CONFIRMS the tracked run (so it proceeds past the unconfirmed
