@@ -171,17 +171,19 @@ jobs:
           SPACELIFT_API_KEY_ENDPOINT: ${{ secrets.SPACELIFT_API_KEY_ENDPOINT }}
           SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
           SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
-        working-directory: terraform
         run: |
-          # --no-find-repository-root: package from THIS dir (terraform/) instead of
-          #   walking up to the repo .git root, matching the stack's project_root.
-          # --tf-env-var-override: run-scoped TF_VAR_artifact_key, NOT a stack setvar.
+          # Run from the repo root (NOT terraform/) and let spacectl find the .git root, so the
+          # uploaded package is the whole repo and Spacelift applies the stack's project_root
+          # ("terraform") to descend into it. The earlier `working-directory: terraform` +
+          # --no-find-repository-root packaged terraform/ AS the root, then project_root=terraform
+          # was applied on top -> "project root terraform does not exist". Don't reintroduce either.
+          # --tf-env-var-override: run-scoped TF_VAR_artifact_key, NOT a stack setvar. The artifact
+          # need not exist for a plan; the var only needs to resolve.
           # local-preview tails by default; it exits non-zero on plan failure, making
           # this job the prod-plan check. (No --auto-confirm: previews never apply.)
           spacectl stack local-preview \
             --id "$SPACELIFT_STACK" \
-            --tf-env-var-override "artifact_key=${GITHUB_SHA}.zip" \
-            --no-find-repository-root
+            --tf-env-var-override "artifact_key=${GITHUB_SHA}.zip"
 
   # ---------------------------------------------------------------------------
   # PROD — pushes to main. OIDC sub = repo:Grimm07/portfolio-backend:environment:production
