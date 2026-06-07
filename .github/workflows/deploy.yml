@@ -1,20 +1,37 @@
 name: Deploy
 
-# Builds the contact-ingest Lambda bundle and applies the backend Terraform to the
-# shadowspire AWS landing zone (us-east-1), via GitHub OIDC (no long-lived AWS keys).
+# Builds the contact-ingest Lambda artifact and hands deployment off to Spacelift,
+# implementing a GitOps promotion model where GitHub Actions is the SOLE trigger:
 #
-#   PR / feature branch  -> DEV  (GitHub Environment "dev",        account 176355979099)
-#   push to main         -> PROD (GitHub Environment "production", account 681053994223)
+#   PR opened/updated -> apply DEV  (auto-deploy)  AND  post a PROD PLAN (preview, no apply)
+#   merge to main     -> apply PROD
+#
+# The prod plan on PRs is a non-applying preview so reviewers see the prod blast radius
+# of a change before it merges; the actual prod apply only happens on push to main.
+#
+# This repo no longer runs `tofu apply` in CI. The backend Terraform is owned by the
+# per-account Spacelift stacks `portfolio-backend-dev` / `portfolio-backend-prod`. CI's job is:
+#
+#   1. Build the Go arm64 `bootstrap` binary (provided.al2023 custom runtime).
+#   2. Zip it (bootstrap at the zip root) named by commit SHA: <sha>.zip.
+#   3. Upload it to the per-account Lambda artifact bucket (name read from SSM
+#      /shadowspire/<env>/lambda-artifacts-bucket), keyed by <sha>.zip.
+#   4. Pin the stack's TF_VAR_artifact_key to <sha>.zip and trigger a tracked Spacelift
+#      run, blocking on the result so a failed apply fails this job.
+#
+# Spacelift's own VCS webhooks are ignored for these stacks (companion infra push policy +
+# enable_local_preview=true); these CLI/spacectl-triggered runs are unaffected by that policy.
+#
+#   deploy-dev  (pull_request)         -> apply  DEV  (GitHub Environment "dev",        account 176355979099, stack portfolio-backend-dev)
+#   plan-prod   (pull_request)         -> PLAN   PROD (no apply, no AWS OIDC; runs server-side on the prod Spacelift worker)
+#   deploy-prod (push: main)           -> apply  PROD (GitHub Environment "production", account 681053994223, stack portfolio-backend-prod)
 #
 # ┌─────────────────────────────────────────────────────────────────────────────────────┐
 # │ OIDC PREREQUISITE (cross-repo): the `portfolio-deploy` role in each account must      │
-# │ trust this repo's OIDC subject. When the backend lived in Grimm07/portfolio the trust │
-# │ policy allowed `repo:Grimm07/portfolio:environment:*`. The infra repo (shadowspire    │
-# │ landing zone) must widen it to also allow                                             │
-# │   repo:Grimm07/portfolio-backend:environment:dev                                      │
-# │   repo:Grimm07/portfolio-backend:environment:production                               │
-# │ Until that lands, the `Configure AWS credentials` step fails with a sts:AssumeRole    │
-# │ "Not authorized to perform sts:AssumeRoleWithWebIdentity" error.                      │
+# │ trust this repo's OIDC subject (repo:Grimm07/portfolio-backend:environment:dev /      │
+# │ :environment:production). It is used HERE only to read the artifact-bucket name from   │
+# │ SSM and upload the zip to S3 (the role already has s3:* + /shadowspire SSM read).      │
+# │ It is NOT used to apply Terraform — Spacelift's own stack role does the apply.         │
 # └─────────────────────────────────────────────────────────────────────────────────────┘
 
 on:
@@ -23,8 +40,9 @@ on:
   pull_request:
     branches: [main]
 
+# Default to least-privilege; jobs that assume an AWS role via OIDC opt into id-token: write
+# individually. plan-prod runs server-side on the Spacelift worker and needs no OIDC token.
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -40,8 +58,13 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     environment: dev
+    permissions:
+      id-token: write # assume the dev portfolio-deploy role via OIDC
+      contents: read
     env:
+      ENV: dev
       AWS_ACCOUNT: "176355979099"
+      SPACELIFT_STACK: portfolio-backend-dev
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v5
@@ -59,20 +82,91 @@ jobs:
         working-directory: backend
         run: make build
 
-      - name: Setup OpenTofu
-        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
-        with:
-          tofu_version: "1.12.1"
+      - name: Zip bootstrap at zip root, keyed by SHA
+        # provided.al2023 requires the executable named `bootstrap` at the ZIP ROOT; -j junks the path.
+        run: ( cd backend && zip -j "../$GITHUB_SHA.zip" bootstrap )
 
-      - name: Apply backend Terraform (dev)
-        working-directory: terraform
-        env:
-          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+      - name: Upload artifact to per-account bucket
         run: |
-          tofu init -reconfigure -backend-config=backend-dev.hcl
-          tofu apply -auto-approve \
-            -var "environment=dev" \
-            -var "contact_email=${CONTACT_EMAIL}"
+          BUCKET=$(aws ssm get-parameter \
+            --name "/shadowspire/${ENV}/lambda-artifacts-bucket" \
+            --query Parameter.Value --output text)
+          aws s3 cp "$GITHUB_SHA.zip" "s3://$BUCKET/$GITHUB_SHA.zip"
+
+      - name: Install spacectl
+        uses: spacelift-io/setup-spacectl@e92035013ee29ed401c9d35772b3ab2f4c8d12cd # v2.1.0
+
+      - name: Trigger Spacelift deploy (blocks on run result)
+        env:
+          SPACELIFT_API_KEY_ENDPOINT: ${{ secrets.SPACELIFT_API_KEY_ENDPOINT }}
+          SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
+          SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
+        run: |
+          # Pin the artifact key on the stack, then trigger a tracked run.
+          #
+          # Interleave consideration: TF_VAR_artifact_key is mutable stack env, so in theory two
+          # deploys to the SAME stack could race (setvar A, setvar B, deploy A picks up B's key).
+          # This is safe here because: (a) Spacelift SERIALIZES tracked runs per stack — the second
+          # deploy queues behind the first and re-reads stack env at its own plan time; and
+          # (b) GitHub's `concurrency: deploy-${{ github.ref }}` already serializes per ref, and dev
+          # vs prod target DISTINCT stacks. `deploy` has no run-scoped --tf-env-var-override (that's
+          # local-preview only), so setvar + deploy is the supported mechanism for tracked runs.
+          spacectl stack environment setvar \
+            --id "$SPACELIFT_STACK" TF_VAR_artifact_key "$GITHUB_SHA.zip"
+          # --auto-confirm CONFIRMS the tracked run (so it proceeds past the unconfirmed
+          # state) but does NOT, by itself, guarantee this job blocks on the outcome. --tail
+          # is what makes spacectl stream the run log and BLOCK until the run finishes, exiting
+          # non-zero if it does not converge — so a failed apply fails this job (no fire-and-forget).
+          spacectl stack deploy --id "$SPACELIFT_STACK" --auto-confirm --tail
+
+  # ---------------------------------------------------------------------------
+  # PLAN PROD — on every PR, post a NON-APPLYING preview of the PR's change against
+  # the prod stack so reviewers see the prod blast radius before merge.
+  #
+  # This job does NOT build the Go binary, does NOT upload an artifact, and does NOT
+  # assume any AWS role: `local-preview` packages the working tree and runs it
+  # server-side on the prod Spacelift worker, which already holds the prod stack role.
+  # The artifact key is injected for THIS run only via --tf-env-var-override (run-scoped,
+  # so it never mutates the stack's pinned TF_VAR_artifact_key — that stays whatever
+  # prod last applied). The prod artifact need not exist in the prod bucket for the plan;
+  # the plan only needs the variable resolvable.
+  #
+  # No `environment:` — a plan must run freely on PRs; gating it behind the reviewer-
+  # protected "production" environment would block the very preview reviewers rely on.
+  # Permissions are contents: read only (no id-token — no OIDC here).
+  # local-preview tails by default and exits non-zero on plan failure, so THIS job is
+  # the PR's prod-plan status check.
+  # ---------------------------------------------------------------------------
+  plan-prod:
+    name: Plan PROD (preview)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SPACELIFT_STACK: portfolio-backend-prod
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install spacectl
+        uses: spacelift-io/setup-spacectl@e92035013ee29ed401c9d35772b3ab2f4c8d12cd # v2.1.0
+
+      - name: Spacelift local-preview (prod plan, no apply)
+        env:
+          SPACELIFT_API_KEY_ENDPOINT: ${{ secrets.SPACELIFT_API_KEY_ENDPOINT }}
+          SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
+          SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
+        working-directory: terraform
+        run: |
+          # --no-find-repository-root: package from THIS dir (terraform/) instead of
+          #   walking up to the repo .git root, matching the stack's project_root.
+          # --tf-env-var-override: run-scoped TF_VAR_artifact_key, NOT a stack setvar.
+          # local-preview tails by default; it exits non-zero on plan failure, making
+          # this job the prod-plan check. (No --auto-confirm: previews never apply.)
+          spacectl stack local-preview \
+            --id "$SPACELIFT_STACK" \
+            --tf-env-var-override "artifact_key=${GITHUB_SHA}.zip" \
+            --no-find-repository-root
 
   # ---------------------------------------------------------------------------
   # PROD — pushes to main. OIDC sub = repo:Grimm07/portfolio-backend:environment:production
@@ -83,8 +177,13 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      id-token: write # assume the prod portfolio-deploy role via OIDC
+      contents: read
     env:
+      ENV: prod
       AWS_ACCOUNT: "681053994223"
+      SPACELIFT_STACK: portfolio-backend-prod
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v5
@@ -102,17 +201,39 @@ jobs:
         working-directory: backend
         run: make build
 
-      - name: Setup OpenTofu
-        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1.0.8
-        with:
-          tofu_version: "1.12.1"
+      - name: Zip bootstrap at zip root, keyed by SHA
+        # provided.al2023 requires the executable named `bootstrap` at the ZIP ROOT; -j junks the path.
+        run: ( cd backend && zip -j "../$GITHUB_SHA.zip" bootstrap )
 
-      - name: Apply backend Terraform (prod)
-        working-directory: terraform
-        env:
-          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+      - name: Upload artifact to per-account bucket
         run: |
-          tofu init -reconfigure -backend-config=backend-prod.hcl
-          tofu apply -auto-approve \
-            -var "environment=prod" \
-            -var "contact_email=${CONTACT_EMAIL}"
+          BUCKET=$(aws ssm get-parameter \
+            --name "/shadowspire/${ENV}/lambda-artifacts-bucket" \
+            --query Parameter.Value --output text)
+          aws s3 cp "$GITHUB_SHA.zip" "s3://$BUCKET/$GITHUB_SHA.zip"
+
+      - name: Install spacectl
+        uses: spacelift-io/setup-spacectl@e92035013ee29ed401c9d35772b3ab2f4c8d12cd # v2.1.0
+
+      - name: Trigger Spacelift deploy (blocks on run result)
+        env:
+          SPACELIFT_API_KEY_ENDPOINT: ${{ secrets.SPACELIFT_API_KEY_ENDPOINT }}
+          SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
+          SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
+        run: |
+          # Pin the artifact key on the stack, then trigger a tracked run.
+          #
+          # Interleave consideration: TF_VAR_artifact_key is mutable stack env, so in theory two
+          # deploys to the SAME stack could race (setvar A, setvar B, deploy A picks up B's key).
+          # This is safe here because: (a) Spacelift SERIALIZES tracked runs per stack — the second
+          # deploy queues behind the first and re-reads stack env at its own plan time; and
+          # (b) GitHub's `concurrency: deploy-${{ github.ref }}` already serializes per ref, and dev
+          # vs prod target DISTINCT stacks. `deploy` has no run-scoped --tf-env-var-override (that's
+          # local-preview only), so setvar + deploy is the supported mechanism for tracked runs.
+          spacectl stack environment setvar \
+            --id "$SPACELIFT_STACK" TF_VAR_artifact_key "$GITHUB_SHA.zip"
+          # --auto-confirm CONFIRMS the tracked run (so it proceeds past the unconfirmed
+          # state) but does NOT, by itself, guarantee this job blocks on the outcome. --tail
+          # is what makes spacectl stream the run log and BLOCK until the run finishes, exiting
+          # non-zero if it does not converge — so a failed apply fails this job (no fire-and-forget).
+          spacectl stack deploy --id "$SPACELIFT_STACK" --auto-confirm --tail
